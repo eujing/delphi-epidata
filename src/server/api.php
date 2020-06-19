@@ -1006,7 +1006,7 @@ function get_covidcast_meta() {
 
   // only consider most recent issues
   $sub_fields = "max(`issue`) `max_issue`, `time_type`, `time_value`, `source`, `signal`, `geo_type`, `geo_value`";
-  $sub_group = "`time_value`, `source`, `signal`, `geo_value`";
+  $sub_group = "`time_value`, `time_type`, `geo_type`, `source`, `signal`, `geo_value`";
   $sub_condition = "x.`max_issue` = t.`issue` AND x.`time_type` = t.`time_type` AND x.`time_value` = t.`time_value` AND x.`source` = t.`source` AND x.`signal` = t.`signal` AND x.`geo_type` = t.`geo_type` AND x.`geo_value` = t.`geo_value`";
   $subquery = "JOIN (SELECT {$sub_fields} FROM {$table} GROUP BY {$sub_group}) x ON {$sub_condition}";
   

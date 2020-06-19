@@ -47,6 +47,7 @@ class CovidcastMetaTests(unittest.TestCase):
         (0, "%s", "%s", "%s", "%s", %d, "%s", 123, %d, 0, 0, 456, 0, %d, 0)
     '''
     expected = []
+    n=0
     for src in ('src1', 'src2'):
       for sig in ('sig1', 'sig2'):
         for tt in ('day', 'week'):
@@ -64,14 +65,16 @@ class CovidcastMetaTests(unittest.TestCase):
               'mean_value': 15,
               'stdev_value': 5,
               'last_update': 123,
-              'max_issue':2,
-              'min_lag':0,
-              'max_lag':0,
+              'max_issue': 2,
+              'min_lag': 0,
+              'max_lag': 0,
             })
             for tv in (1, 2):
               for gv, v in zip(('geo1', 'geo2'), (10, 20)):
                 self.cur.execute(template % (src, sig, tt, gt, tv, gv, v, tv))
+                n+=1
     self.cnx.commit()
+    self.assertEqual(n,64)
 
     # make the request
     response = requests.get(BASE_URL, params={'source': 'covidcast_meta'})
