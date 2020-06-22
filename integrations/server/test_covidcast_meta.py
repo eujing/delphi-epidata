@@ -47,7 +47,6 @@ class CovidcastMetaTests(unittest.TestCase):
         (0, "%s", "%s", "%s", "%s", %d, "%s", 123, %d, 0, 0, 456, 0, %d, 0)
     '''
     expected = []
-    n=0
     for src in ('src1', 'src2'):
       for sig in ('sig1', 'sig2'):
         for tt in ('day', 'week'):
@@ -72,27 +71,14 @@ class CovidcastMetaTests(unittest.TestCase):
             for tv in (1, 2):
               for gv, v in zip(('geo1', 'geo2'), (10, 20)):
                 self.cur.execute(template % (src, sig, tt, gt, tv, gv, v, tv))
-                n+=1
     self.cnx.commit()
-    self.assertEqual(n,64)
 
     # make the request
     response = requests.get(BASE_URL, params={'source': 'covidcast_meta'})
     response.raise_for_status()
     response = response.json()
 
-    self.maxDiff=None
     # assert that the right data came back
-    newline = "\n"
-    self.assertEqual(len(response['epidata']),len(expected),
-                     f"""
-Expected:
-{newline.join(str(x) for x in sorted( (y['data_source'],y['signal'],y['time_type'],y['geo_type']) for y in expected ))}
-
-Got:
-{newline.join(str(x) for x in sorted( (y['data_source'],y['signal'],y['time_type'],y['geo_type']) for y in response['epidata'] ))}
-""")
-      
     self.assertEqual(response, {
       'result': 1,
       'epidata': expected,
@@ -126,6 +112,9 @@ Got:
                 'mean_value': 15,
                 'stdev_value': 5,
                 'last_update': 123,
+                'max_issue': 2,
+                'min_lag': 0,
+                'max_lag': 0,
               })
             for tv in (1, 2):
               for gv, v in zip(('geo1', 'geo2'), (10, 20)):
