@@ -56,14 +56,18 @@ def parse_args():
         help="More verbose debug output")
 
     args = parser.parse_args()
+    return args
+
+def show_args(args):
+    '''
+    Display arguments being used
+    '''
     logging.info("Input files (in order):\n\t%s", "\n\t".join(sorted(args.sql_files)))
     logging.info("Skipping sources: [%s]", ", ".join(args.skip_sources))
     logging.info("Temporary dir: %s", args.tmp_dir)
     logging.info("Output dir: %s", args.out_dir)
     logging.info("Max insert chunk: %d", args.chunk_size)
     logging.info("Debug output: %s", args.debug)
-
-    return args
 
 def main(args):
     '''
@@ -79,9 +83,10 @@ def main(args):
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s:\t%(message)s")
 
+    show_args(args)
+
     os.makedirs(args.tmp_dir, exist_ok=True)
     os.makedirs(args.out_dir, exist_ok=True)
-
 
     # 1) Extract relevant tuples from .sql into CSVs so we can use CSV diffing tools
     logging.info("Extracting to csvs...")
@@ -318,7 +323,6 @@ def create_issue_from_change(
     for col, diff in change["fields"].items():
         assert latest_issue[col] == diff["from"]
         issue[col] = diff["to"]
-        issue["issue"] = date_to_int(issue_date)
 
     issue["issue"] = date_to_int(issue_date)
     if time_type == "'day'":
