@@ -371,10 +371,11 @@ def update_issues(
                 accum[index] = [issue]
     else:
         # Perform the CSV diff using INDEX_COLS to identify rows
-        patch = csvdiff.diff_files(before_file, after_file, INDEX_COLS)
+        patch = csvdiff.diff_files(before_file, after_file, INDEX_COLS, ignored_columns=["id"])
 
         if len(patch["removed"]) > 0:
-            logging.warning("Apparently there are %d removed entries!", len(patch["removed"]))
+            removed_signal_names = {entry["signal"] for entry in patch["removed"]}
+            logging.warning("There are %d removed entries! Signal names = %s", len(patch["removed"]), ",".join(removed_signal_names))
 
         for entry in patch["added"]:
             index = create_index(entry)

@@ -29,6 +29,7 @@ ALL_COLS_WITH_PK = ["id"] + ALL_COLS
 
 # Dtypes that try save memory by using categoricals
 DTYPES = {
+    # skip "id", the primary key as it may have changed
     "source": "category",
     "signal": "category",
     "time_type": "category",
@@ -287,7 +288,7 @@ def pd_csvdiff(
         index_cols: List[str],
         dtypes: Dict[str, str]) -> pd.DataFrame:
     '''
-    Finds the diff (additions and changes ONLY) between two CSV files, assuming no removals.
+    Finds the diff (additions and changes ONLY) between two CSV files. Removals are not reported.
     Uses pandas with specified dtypes to save some memory.
 
     Args:
@@ -311,9 +312,10 @@ def pd_csvdiff(
     df_after.sort_index(inplace=True)
 
     # Find additions and changes together
-    # Expand up df_before to shape of df_after then do a diff
+    # Re-index df_before to be like df_after then do a diff
     # For common indices, different field values turn up in diff_mask
     # Since df_before is filled with NaN for new indices, new indices turn up in diff_mask
+    # Removed indices will be removed by the reindex operation so we cannot identify them
     diff_mask = (df_before.reindex(df_after.index) != df_after)
     diff_idx = diff_mask.any(axis=1).index
 
