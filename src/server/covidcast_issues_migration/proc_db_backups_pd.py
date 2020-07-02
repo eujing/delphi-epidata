@@ -11,10 +11,11 @@ from collections import defaultdict
 import datetime
 import glob
 import gzip
-from itertools import islice, chain
+from itertools import islice, chain, starmap
 import logging
+from multiprocessing import Pool
 import os
-from typing import Optional, List, Iterable, Iterator, Dict
+from typing import Optional, List, Iterable, Iterator, Dict, Tuple
 
 # Third party
 import pandas as pd
@@ -68,6 +69,15 @@ def parse_args():
         "--max-insert-chunk", dest="chunk_size", default=1000, type=int,
         help="Maximum number of rows to have per SQL INSERT statement")
     parser.add_argument(
+        "--par", dest="parallel", action="store_true",
+        help="Enable multiprocessing")
+    parser.add_argument(
+        "--ncpu-csvs", dest="ncpu_csvs", default=1, type=int,
+        help="Max number of processes to use for CSV processing (low memory usage)")
+    parser.add_argument(
+        "--ncpu-sources", dest="ncpu_sources", default=1, type=int,
+        help="Max number of processes to use for processing sources (high memory usage)")
+    parser.add_argument(
         "--debug", dest="debug", action="store_true",
         help="More verbose debug output")
 
@@ -83,6 +93,10 @@ def show_args(args):
     logging.info("Temporary dir: %s", args.tmp_dir)
     logging.info("Output dir: %s", args.out_dir)
     logging.info("Max insert chunk: %d", args.chunk_size)
+    logging.info("Parallel: %s", args.parallel)
+    if args.parallel:
+        logging.info("Num. CPU (CSVs): %d", args.ncpu_csvs)
+        logging.info("Num. CPU (sources): %d", args.ncpu_sources)
     logging.info("Debug output: %s", args.debug)
     print()
 
@@ -108,6 +122,7 @@ def main(args):
     # 1) Extract relevant tuples from .sql into CSVs so we can use CSV diffing tools
     logging.info("Extracting to csvs...")
     csv_files = []
+    extract_args = []
 
     # Ensure files are in sorted order of date in filename
     for sql_file in sorted(args.sql_files):
@@ -115,54 +130,78 @@ def main(args):
             args.tmp_dir,
             f"just_covidcast_{date_int_from_filename(sql_file)}.csv")
 
-        logging.debug("Processing %s into %s", sql_file, csv_file)
-        extract_to_csv(sql_file, csv_file)
+        extract_args.append((sql_file, csv_file))
         csv_files.append(csv_file)
+
+    if args.parallel:
+        with Pool(args.ncpu_csvs) as p_csv:
+            p_csv.starmap(extract_to_csv, extract_args)
+    else:
+        starmap(extract_to_csv, extract_args)
 
     # 2) Split each backup's csv by source
     logging.info("Splitting csvs...")
-    files_by_src = defaultdict(list)
-
     split_col = 1
-    for csv_file in csv_files:
-        logging.debug("Splitting %s by %s", csv_file, ALL_COLS_WITH_PK[split_col])
-        by_src = split_csv_by_col(csv_file, split_col, add_header=True)
+    split_csv_args = [(csv_file, split_col) for csv_file in csv_files]
 
+    if args.parallel:
+        with Pool(args.ncpu_csvs) as p_csv:
+            by_srcs = p_csv.starmap(split_csv_by_col, split_csv_args)
+    else:
+        by_srcs = starmap(split_csv_by_col, split_csv_args)
+
+    # Combine all return dictionaries into a dictionary of lists instead
+    files_by_src = defaultdict(list)
+    for by_src in by_srcs:
         for src, sub_csv_file in by_src.items():
             files_by_src[src].append(sub_csv_file)
 
     # 3) Find issues from sliding pairs of [None, csv_1, csv_2, ... csv_N] for each source
+    proc_args = []
     for source, src_files in files_by_src.items():
-
         if source in args.skip_sources:
             logging.info("Skipping group: %s", source)
             continue
 
-        logging.info("Processing group: %s", source)
-        logging.info("Finding issues and generating SQL file...")
-        files = [None] + src_files
-        outfile = os.path.join(args.out_dir, f"{source}.sql")
-        logging.debug("Writing to %s", outfile)
+        proc_args.append((args, source, src_files))
 
-        with open(outfile, "w") as f_sql:
-            for before_file, after_file in zip(files, files[1:]):
-                if before_file is None:
-                    logging.debug("First: %s", date_int_from_filename(after_file))
-                else:
-                    logging.debug(
-                        "Diffing: from %s to %s",
-                        date_int_from_filename(before_file),
-                        date_int_from_filename(after_file))
+    if args.parallel:
+        with Pool(args.ncpu_sources) as p_sources:
+            p_sources.starmap(process_source, proc_args)
+    else:
+        starmap(process_source, proc_args)
 
-                # Diff and find new issues
-                issues = generate_issues(before_file, after_file)
+def process_source(args, source, src_files):
+    logging.info("[%s] Processing group", source)
+    logging.info("[%s] Finding issues and generating SQL file...", source)
+    files = [None] + src_files
+    outfile = os.path.join(args.out_dir, f"{source}.sql")
+    logging.debug("[%s] Writing to %s", source, outfile)
 
-                # 4) Write out found issues into the SQL file
-                for issues_chunk in chunked(issues, args.chunk_size):
-                    insert_stmt = COVIDCAST_INSERT_START + \
-                        ",\n".join(issues_chunk) + \
-                        ";\n"
-                    f_sql.write(insert_stmt)
+    with open(outfile, "w") as f_sql:
+        for before_file, after_file in zip(files, files[1:]):
+            if before_file is None:
+                logging.debug(
+                    "[%s] First: %s",
+                    source,
+                    date_int_from_filename(after_file))
+            else:
+                logging.debug(
+                    "[%s] Diffing: from %s to %s",
+                    source,
+                    date_int_from_filename(before_file),
+                    date_int_from_filename(after_file))
+
+            # Diff and find new issues
+            issues = generate_issues(before_file, after_file)
+
+            # 4) Write out found issues into the SQL file
+            for issues_chunk in chunked(issues, args.chunk_size):
+                insert_stmt = COVIDCAST_INSERT_START + \
+                    ",\n".join(issues_chunk) + \
+                    ";\n"
+                f_sql.write(insert_stmt)
+
 
 def extract_to_csv(filename: str, output: str):
     '''
@@ -173,6 +212,8 @@ def extract_to_csv(filename: str, output: str):
         filename: Input .sql or .sql.gz file
         output: Output .csv file
     '''
+
+    logging.debug("Processing %s into %s", filename, output)
 
     is_covidcast = lambda line: line.startswith(COVIDCAST_INSERT_START)
 
@@ -200,7 +241,7 @@ def extract_to_csv(filename: str, output: str):
                 f_out.write(split_up_insert + "\n")
 
 def split_csv_by_col(
-        filename: str, col_idx: int, add_header: bool = False) -> Dict[str, str]:
+        filename: str, col_idx: int, add_header: bool = True) -> Dict[str, str]:
     '''
     Splits up a CSV file by unique values of a specified column into subset CSVs.
     Produces subset CSVs in same directory as input, with '_{value}' appended to filename.
@@ -214,6 +255,8 @@ def split_csv_by_col(
     Returns:
         Mapping from column value -> subset CSV filename
     '''
+
+    logging.debug("Splitting %s by %s", filename, ALL_COLS_WITH_PK[col_idx])
 
     open_file_writers = {}
     created_files = {}
@@ -286,9 +329,12 @@ def date_int_from_filename(filename: str) -> int:
 def pd_csvdiff(
         before_file: str, after_file: str,
         index_cols: List[str],
-        dtypes: Dict[str, str]) -> pd.DataFrame:
+        dtypes: Dict[str, str],
+        find_removals: bool = False
+        ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     '''
-    Finds the diff (additions and changes ONLY) between two CSV files. Removals are not reported.
+    Finds the diff (additions and changes only by default) between two CSV files.
+    Can find removals, but the additional index operations required add significant time.
     Uses pandas with specified dtypes to save some memory.
 
     Args:
@@ -296,6 +342,7 @@ def pd_csvdiff(
         after_file: The "after" CSV file to diff to
         index_cols: Column names to use as the index that identifies an entry
         dtypes: Dtype definitions for column names to try save memory
+        find_removals: Whether to find entries that were removed too
 
     Returns:
         A dataframe containing a subset of the after_file CSV that represents additions and changes
@@ -317,9 +364,18 @@ def pd_csvdiff(
     # Since df_before is filled with NaN for new indices, new indices turn up in diff_mask
     # Removed indices will be removed by the reindex operation so we cannot identify them
     diff_mask = (df_before.reindex(df_after.index) != df_after)
-    diff_idx = diff_mask.any(axis=1).index
+    is_diff = diff_mask.any(axis=1)
 
-    return df_after.loc[diff_idx, :]
+    if find_removals:
+        removed_idx = df_before.index.difference(df_after.index)
+
+        return (
+            df_after.loc[is_diff, :],
+            df_before.loc[removed_idx, :])
+
+    return (
+        df_after.loc[is_diff, :],
+        None)
 
 def generate_issues(
         before_file: Optional[str], after_file: str) -> Iterator[str]:
@@ -353,7 +409,7 @@ def generate_issues(
             dtype=DTYPES, index_col=INDEX_COLS, na_filter=False)
     else:
         # Perform the CSV diff using INDEX_COLS to identify rows
-        df_diff = pd_csvdiff(before_file, after_file, INDEX_COLS, DTYPES)
+        df_diff, _ = pd_csvdiff(before_file, after_file, INDEX_COLS, DTYPES, find_removals=False)
 
     # TODO: Does not really handle weekly values properly. Weekly time_value are in YYYYww format
     df_diff["lag"] = (issue_date - df_diff.index.get_level_values("time_value")).days

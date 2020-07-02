@@ -124,7 +124,7 @@ def main(args):
         logging.info("Processing group: %s", source)
         logging.info("Accumulating issues...")
         files = [None] + src_files
-        accum = {}
+        accum = defaultdict(list)
 
         for before_file, after_file in zip(files, files[1:]):
             if before_file is None:
@@ -137,7 +137,6 @@ def main(args):
             update_issues(before_file, after_file, accum)
 
         # 4) Write out accumulated issues into one or several SQL files
-        # TODO: Decide how to generate the SQL files, all-in-one or separately by source?
         logging.info("Generating SQL file...")
         outfile = os.path.join(args.out_dir, f"{source}.sql")
 
@@ -333,7 +332,7 @@ def create_issue_from_change(
     return issue
 
 def update_issues(
-        before_file: Optional[str], after_file: str, accum: dict) -> dict:
+        before_file: Optional[str], after_file: str, accum: defaultdict) -> dict:
     '''
     Updates an accumulator (accum) that maps the unique indices to a list of issues
     If before_file is None, then accum should be empty and we are simplying filling
@@ -365,10 +364,9 @@ def update_issues(
                 entry = dict(zip(ALL_COLS, row[1:]))
                 index = create_index(entry)
 
-                # TODO: Should the first issue date be from the first backup date?
                 issue = create_issue(entry, issue_date)
 
-                accum[index] = [issue]
+                accum[index].append(issue)
     else:
         # Perform the CSV diff using INDEX_COLS to identify rows
         patch = csvdiff.diff_files(before_file, after_file, INDEX_COLS, ignored_columns=["id"])
@@ -381,10 +379,7 @@ def update_issues(
             index = create_index(entry)
             issue = create_issue(entry, issue_date)
 
-            assert index not in accum
-
-            # Create initial list for this particular index
-            accum[index] = [issue]
+            accum[index].append(issue)
 
         for change in patch["changed"]:
             index = tuple(change["key"])
