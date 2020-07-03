@@ -19,6 +19,7 @@ from typing import Optional, List, Iterable, Iterator, Dict, Tuple
 
 # Third party
 import pandas as pd
+from multiprocessing_logging import install_mp_handler, uninstall_mp_handler
 
 COVIDCAST_INSERT_START = "INSERT INTO `covidcast` VALUES "
 
@@ -134,8 +135,12 @@ def main(args):
         csv_files.append(csv_file)
 
     if args.parallel:
-        with Pool(args.ncpu_csvs) as p_csv:
-            p_csv.starmap(extract_to_csv, extract_args)
+        install_mp_handler()
+        try:
+            with Pool(args.ncpu_csvs) as p_csv:
+                p_csv.starmap(extract_to_csv, extract_args)
+        finally:
+            uninstall_mp_handler()
     else:
         starmap(extract_to_csv, extract_args)
 
@@ -145,8 +150,12 @@ def main(args):
     split_csv_args = [(csv_file, split_col) for csv_file in csv_files]
 
     if args.parallel:
-        with Pool(args.ncpu_csvs) as p_csv:
-            by_srcs = p_csv.starmap(split_csv_by_col, split_csv_args)
+        install_mp_handler()
+        try:
+            with Pool(args.ncpu_csvs) as p_csv:
+                by_srcs = p_csv.starmap(split_csv_by_col, split_csv_args)
+        finally:
+            install_mp_handler()
     else:
         by_srcs = starmap(split_csv_by_col, split_csv_args)
 
@@ -166,8 +175,12 @@ def main(args):
         proc_args.append((args, source, src_files))
 
     if args.parallel:
-        with Pool(args.ncpu_sources) as p_sources:
-            p_sources.starmap(process_source, proc_args)
+        install_mp_handler()
+        try:
+            with Pool(args.ncpu_sources) as p_sources:
+                p_sources.starmap(process_source, proc_args)
+        finally:
+            uninstall_mp_handler()
     else:
         starmap(process_source, proc_args)
 
