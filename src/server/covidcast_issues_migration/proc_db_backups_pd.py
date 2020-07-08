@@ -79,6 +79,9 @@ def parse_args():
         "--ncpu-sources", dest="ncpu_sources", default=1, type=int,
         help="Max number of processes to use for processing sources (high memory usage)")
     parser.add_argument(
+        "--incremental", dest="use_cache", action="store_true",
+        help="Reuse results in --tmp-dir, and skip over existing results in --out-dir")
+    parser.add_argument(
         "--debug", dest="debug", action="store_true",
         help="More verbose debug output")
 
@@ -98,6 +101,7 @@ def show_args(args):
     if args.parallel:
         logging.info("Num. CPU (CSVs): %d", args.ncpu_csvs)
         logging.info("Num. CPU (sources): %d", args.ncpu_sources)
+    logging.info("Incremental: %s", args.use_cache)
     logging.info("Debug output: %s", args.debug)
     print()
 
@@ -131,36 +135,45 @@ def main(args):
             args.tmp_dir,
             f"just_covidcast_{date_int_from_filename(sql_file)}.csv")
 
-        extract_args.append((sql_file, csv_file))
+        if args.use_cache and os.path.exists(csv_file):
+            logging.debug("CSV %s already exists, skipping processing of %s", csv_file, sql_file)
+        else:
+            extract_args.append((sql_file, csv_file))
+
+        # Regardless of cache, keep track of csv files anyway
         csv_files.append(csv_file)
 
-    if args.parallel:
-        install_mp_handler()
-        try:
-            with Pool(args.ncpu_csvs) as p_csv:
-                p_csv.starmap(extract_to_csv, extract_args)
-        finally:
-            uninstall_mp_handler()
-    else:
-        starmap(extract_to_csv, extract_args)
+    starmap_mp_logging(
+        extract_to_csv, extract_args,
+        par=args.parallel, ncpu=args.ncpu_csvs)
 
     # 2) Split each backup's csv by source
     logging.info("Splitting csvs...")
     split_col = 1
-    split_csv_args = [(csv_file, split_col) for csv_file in csv_files]
+    split_csv_args = []
+    files_by_src = defaultdict(list)
 
-    if args.parallel:
-        install_mp_handler()
-        try:
-            with Pool(args.ncpu_csvs) as p_csv:
-                by_srcs = p_csv.starmap(split_csv_by_col, split_csv_args)
-        finally:
-            install_mp_handler()
-    else:
-        by_srcs = starmap(split_csv_by_col, split_csv_args)
+    for csv_file in csv_files:
+        base_name, f_ext = os.path.splitext(csv_file)
+        split_patt = f"{base_name}_*{f_ext}"
+        split_csv_files = glob.glob(split_patt)
+
+        if args.use_cache and len(split_csv_files) > 0:
+            logging.debug("CSV %s already split, skipping splitting", csv_file)
+
+            # If split csvs already exist, update files_by_src directly
+            for sub_csv_file in split_csv_files:
+                src = sub_csv_file.split("_")[-1][:-4]
+                files_by_src[src].append(sub_csv_file)
+        else:
+            split_csv_args.append((csv_file, split_col))
+
+    by_srcs = starmap_mp_logging(
+        split_csv_by_col, split_csv_args,
+        par=args.parallel, ncpu=args.ncpu_csvs)
 
     # Combine all return dictionaries into a dictionary of lists instead
-    files_by_src = defaultdict(list)
+    # Note that each list may not be sorted
     for by_src in by_srcs:
         for src, sub_csv_file in by_src.items():
             files_by_src[src].append(sub_csv_file)
@@ -174,47 +187,79 @@ def main(args):
 
         proc_args.append((args, source, src_files))
 
-    if args.parallel:
+    output_sql_files = starmap_mp_logging(
+        process_source, proc_args,
+        par=args.parallel, ncpu=args.ncpu_sources)
+
+    return output_sql_files
+
+def starmap_mp_logging(func, args: Iterable, par: bool = False, ncpu: Optional[int] = None):
+    '''
+    Does a starmap of f over args, either in parallel or serially, with logging support
+
+    Args:
+        func: Callable to execute with each of args
+        args: List-like of args to execute f with
+        par: Whether to run in parallel or not
+        ncpu: When par=True, how many processes to use
+
+    Returns:
+        Result equivalent to starmap(f, args)
+    '''
+    if par:
         install_mp_handler()
         try:
-            with Pool(args.ncpu_sources) as p_sources:
-                p_sources.starmap(process_source, proc_args)
+            with Pool(ncpu) as pool:
+                return pool.starmap(func, args)
         finally:
             uninstall_mp_handler()
     else:
-        starmap(process_source, proc_args)
+        return starmap(func, args)
 
-def process_source(args, source, src_files):
-    logging.info("[%s] Processing group", source)
-    logging.info("[%s] Finding issues and generating SQL file...", source)
-    files = [None] + src_files
-    outfile = os.path.join(args.out_dir, f"{source}.sql")
-    logging.debug("[%s] Writing to %s", source, outfile)
+def process_source(args, source: str, src_files: List[str]) -> List[List[str]]:
+    logging.info("[%s] Finding issues and generating SQL files...", source)
+    files = [None] + sorted(src_files)
+    output_files = []
 
-    with open(outfile, "w") as f_sql:
-        for before_file, after_file in zip(files, files[1:]):
-            if before_file is None:
-                logging.debug(
-                    "[%s] First: %s",
-                    source,
-                    date_int_from_filename(after_file))
-            else:
-                logging.debug(
-                    "[%s] Diffing: from %s to %s",
-                    source,
-                    date_int_from_filename(before_file),
-                    date_int_from_filename(after_file))
+    for before_file, after_file in zip(files, files[1:]):
+        date_int_after = date_int_from_filename(after_file)
+        if before_file is None:
+            logging.debug("[%s] First: %s", source, date_int_after)
+            outfile = os.path.join(args.out_dir, f"{source}_00000000_{date_int_after}.sql")
+        else:
+            date_int_before = date_int_from_filename(before_file)
+            logging.debug("[%s] Diffing: from %s to %s", source, date_int_before, date_int_after)
+            outfile = os.path.join(args.out_dir, f"{source}_{date_int_before}_{date_int_after}.sql")
 
-            # Diff and find new issues
-            issues = generate_issues(before_file, after_file)
+        # Diff and find new issues
+        if args.use_cache and os.path.exists(outfile):
+            logging.debug(
+                "[%s] SQL file %s already generated, skipping diff",
+                source, outfile)
+            output_files.append(outfile)
+            continue
 
-            # 4) Write out found issues into the SQL file
-            for issues_chunk in chunked(issues, args.chunk_size):
-                insert_stmt = COVIDCAST_INSERT_START + \
-                    ",\n".join(issues_chunk) + \
-                    ";\n"
-                f_sql.write(insert_stmt)
+        issues = generate_issues(before_file, after_file)
 
+        # 4) Write out found issues into the SQL file
+        logging.debug("[%s] Writing to %s", source, outfile)
+        try:
+            with open(outfile, "w") as f_sql:
+                for issues_chunk in chunked(issues, args.chunk_size):
+                    insert_stmt = COVIDCAST_INSERT_START + \
+                        ",\n".join(issues_chunk) + \
+                        ";\n"
+                    f_sql.write(insert_stmt)
+            output_files.append(outfile)
+
+        except Exception as ex:
+            logging.error(
+                "[%s] Stopped unexpectedly while writing %s, deleting it",
+                source, outfile, exc_info=True)
+            os.remove(outfile)
+            raise ex
+
+    return output_files
 
 def extract_to_csv(filename: str, output: str):
     '''
@@ -362,23 +407,36 @@ def pd_csvdiff(
     '''
     df_before = pd.read_csv(
         before_file, usecols=dtypes.keys(), parse_dates=["time_value"],
-        dtype=dtypes, index_col=index_cols, na_filter=False)
+        dtype=dtypes, na_filter=False)
     df_after = pd.read_csv(
         after_file, usecols=dtypes.keys(), parse_dates=["time_value"],
-        dtype=dtypes, index_col=index_cols, na_filter=False)
+        dtype=dtypes, na_filter=False)
+
+    # Efficiently union all categories together for comparison
+    for col, dtype in dtypes.items():
+        if dtype == "category":
+            before_cats = df_before[col].cat.categories
+            after_cats = df_after[col].cat.categories
+            df_before[col].cat.add_categories(after_cats.difference(before_cats), inplace=True)
+            df_after[col].cat.add_categories(before_cats.difference(after_cats), inplace=True)
+
+            assert df_before[col].dtype == df_after[col].dtype
+
+    df_before.set_index(index_cols, inplace=True)
+    df_after.set_index(index_cols, inplace=True)
 
     # Ensure lex sorted indices for efficient indexing
     df_before.sort_index(inplace=True)
     df_after.sort_index(inplace=True)
 
     # Find additions and changes together
-    # Re-index df_before to be like df_after then do a diff
-    # For common indices, different field values turn up in diff_mask
-    # Since df_before is filled with NaN for new indices, new indices turn up in diff_mask
-    # Removed indices will be removed by the reindex operation so we cannot identify them
-    diff_mask = (df_before.reindex(df_after.index) != df_after)
-    is_diff = diff_mask.any(axis=1)
+    # Re-index df_before to be like df_after, index-wise, then do a diff
+    # For common indices, different field values be false in same_mask
+    # Since df_before is filled with NaN for new indices, new indices turn false in same_mask
+    same_mask = (df_before.reindex(df_after.index) == df_after)
+    is_diff = ~same_mask.all(axis=1)
 
+    # Removed indices can be found via index difference, but is expensive
     if find_removals:
         removed_idx = df_before.index.difference(df_after.index)
 
@@ -415,14 +473,20 @@ def generate_issues(
         "{row.timestamp1},{row.value},{row.stderr},{row.sample_size},{row.timestamp2},{row.direction}," \
         "{issue},{row.lag})"
 
-    if before_file is None:
-        # At first file, just yield all contents as new issues
-        df_diff = pd.read_csv(
-            after_file, usecols=DTYPES.keys(), parse_dates=["time_value"],
-            dtype=DTYPES, index_col=INDEX_COLS, na_filter=False)
-    else:
-        # Perform the CSV diff using INDEX_COLS to identify rows
-        df_diff, _ = pd_csvdiff(before_file, after_file, INDEX_COLS, DTYPES, find_removals=False)
+    try:
+        if before_file is None:
+            # At first file, just yield all contents as new issues
+            df_diff = pd.read_csv(
+                after_file, usecols=DTYPES.keys(), parse_dates=["time_value"],
+                dtype=DTYPES, index_col=INDEX_COLS, na_filter=False)
+        else:
+            # Perform the CSV diff using INDEX_COLS to identify rows
+            df_diff, _ = pd_csvdiff(before_file, after_file, INDEX_COLS, DTYPES)
+    except Exception as ex:
+        logging.error(
+            "Diff Failed!!! Between files '%s', '%s'",
+            before_file, after_file, exc_info=True)
+        raise ex
 
     # TODO: Does not really handle weekly values properly. Weekly time_value are in YYYYww format
     df_diff["lag"] = (issue_date - df_diff.index.get_level_values("time_value")).days
