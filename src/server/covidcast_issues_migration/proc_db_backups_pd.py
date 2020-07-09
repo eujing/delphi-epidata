@@ -365,16 +365,13 @@ def datetime_to_int(date: datetime.datetime) -> int:
     '''
     Convert input datetime.date to date integer format YYYYmmdd
     '''
-    return date.day + date.month * 100 + date.year * 10000
+    return int(date.strftime("%Y%m%d"))
 
 def int_to_datetime(date_int: int) -> datetime.datetime:
     '''
     Convert input date integer format YYYYmmdd to datetime.datetime
     '''
-    day = date_int % 100
-    month = (date_int // 100) % 100
-    year = date_int // 10000
-    return datetime.datetime(year, month, day)
+    return datetime.datetime.strptime(str(date_int),"%Y%m%d")
 
 def date_int_from_filename(filename: str) -> int:
     '''
@@ -434,7 +431,9 @@ def pd_csvdiff(
     # For common indices, different field values be false in same_mask
     # Since df_before is filled with NaN for new indices, new indices turn false in same_mask
     same_mask = (df_before.reindex(df_after.index) == df_after)
-    is_diff = ~same_mask.all(axis=1)
+
+    # Ignore timestamp2 in the diff
+    is_diff = ~(same_mask.loc[:, same_mask.columns != "timestamp2"].all(axis=1))
 
     # Removed indices can be found via index difference, but is expensive
     if find_removals:

@@ -243,16 +243,13 @@ def date_to_int(date: datetime.date) -> int:
     '''
     Convert input datetime.date to date integer format YYYYmmdd
     '''
-    return date.day + date.month * 100 + date.year * 10000
+    return int(date.strftime("%Y%m%d"))
 
 def int_to_date(date_int: int) -> datetime.date:
     '''
     Convert input date integer format YYYYmmdd to datetime.date
     '''
-    day = date_int % 100
-    month = (date_int // 100) % 100
-    year = date_int // 10000
-    return datetime.date(year, month, day)
+    return datetime.datetime.strptime(str(date_int),"%Y%m%d").date()
 
 def date_int_from_filename(filename: str) -> int:
     '''
@@ -305,7 +302,7 @@ def create_issue_from_change(
         latest_issue: dict, change: dict,
         index: tuple, issue_date: datetime.date) -> dict:
     '''
-    Creates an issue, i.e. the values that may chaneg across time from the latest issue
+    Creates an issue, i.e. the values that may change across time from the latest issue
     Takes 'time_type' into consideration when calculating 'lag'
 
     Args:
